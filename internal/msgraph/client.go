@@ -197,11 +197,11 @@ func (c *Client) resolveFolderID(ctx context.Context, name string) (string, erro
 
 // fetchAttachments downloads all non-inline DMARC file attachments for a message.
 func (c *Client) fetchAttachments(ctx context.Context, msgID string) ([]Attachment, error) {
-	// $select cannot include contentBytes here: it is a fileAttachment-specific property
-	// and Graph API validates $select against the base attachment type, returning HTTP 400.
-	// We list metadata first, then fetch each qualifying attachment individually.
+	// @odata.type is an OData annotation returned automatically for polymorphic
+	// collections; it cannot appear in $select and causes HTTP 400 if included.
+	// contentBytes is fetched per-attachment below to avoid the same issue.
 	listURL := fmt.Sprintf(
-		"%s/users/%s/messages/%s/attachments?$select=id,name,contentType,isInline,@odata.type",
+		"%s/users/%s/messages/%s/attachments?$select=id,name,contentType,isInline",
 		graphBase, url.PathEscape(c.cfg.Mailbox), msgID,
 	)
 	var listResp struct {
