@@ -19,11 +19,63 @@ var (
 	ErrMissingIMAPPassword = errors.New("IMAP_PASSWORD is required: set via environment variable or config file")
 )
 
+// MSGraphConfig configures Microsoft Graph API access for Microsoft 365 mailboxes.
+//
+// This is used instead of IMAP when your M365 tenant requires OAuth authentication.
+// Set "enabled": true and provide the three Azure credentials; IMAP config is then ignored.
+//
+// Azure app registration steps:
+//  1. Register an app in Entra ID (https://entra.microsoft.com) and create a client secret.
+//  2. Grant the application permission Mail.ReadWrite (not delegated) under Microsoft Graph.
+//  3. Restrict the app to a single mailbox using Exchange PowerShell (strongly recommended):
+//       New-ApplicationAccessPolicy \
+//         -AccessRight RestrictAccess \
+//         -AppId "<client_id>" \
+//         -PolicyScopeGroupId "<mailbox_email>" \
+//         -Description "Restrict parse-dmarc to DMARC reports mailbox"
+//  4. Fill in tenant_id, client_id, client_secret, and mailbox below.
+type MSGraphConfig struct {
+	// Enabled switches the fetch backend to Microsoft Graph. IMAP config is ignored when true.
+	Enabled bool `json:"enabled" env:"MSGRAPH_ENABLED" envDefault:"false"`
+	// TenantID is the Azure AD / Entra ID tenant (directory) ID.
+	TenantID string `json:"tenant_id" env:"MSGRAPH_TENANT_ID"`
+	// ClientID is the application (client) ID from the Azure app registration.
+	ClientID string `json:"client_id" env:"MSGRAPH_CLIENT_ID"`
+	// ClientSecret is the client secret value from the Azure app registration.
+	ClientSecret string `json:"client_secret" env:"MSGRAPH_CLIENT_SECRET"`
+	// Mailbox is the email address of the mailbox to read (e.g. dmarc@example.com).
+	Mailbox string `json:"mailbox" env:"MSGRAPH_MAILBOX"`
+	// MailboxFolder is the folder to read from. Accepts well-known names (inbox, archive,
+	// deleteditems, drafts, junkemail, outbox, sentitems) or a custom display name.
+	MailboxFolder string `json:"mailbox_folder" env:"MSGRAPH_MAILBOX_FOLDER" envDefault:"inbox"`
+	// MarkAsRead marks each processed message as read (default: true).
+	MarkAsRead bool `json:"mark_as_read" env:"MSGRAPH_MARK_AS_READ" envDefault:"true"`
+	// ProcessedFolder, when set, moves processed messages into this folder (created if absent).
+	ProcessedFolder string `json:"processed_folder" env:"MSGRAPH_PROCESSED_FOLDER"`
+}
+
+func (m *MSGraphConfig) validate() error {
+	if m.TenantID == "" {
+		return errors.New("MSGRAPH_TENANT_ID is required when MSGraph is enabled")
+	}
+	if m.ClientID == "" {
+		return errors.New("MSGRAPH_CLIENT_ID is required when MSGraph is enabled")
+	}
+	if m.ClientSecret == "" {
+		return errors.New("MSGRAPH_CLIENT_SECRET is required when MSGraph is enabled")
+	}
+	if m.Mailbox == "" {
+		return errors.New("MSGRAPH_MAILBOX is required when MSGraph is enabled")
+	}
+	return nil
+}
+
 // Config holds the application configuration
 type Config struct {
 	LogLevel    string         `json:"log_level" env:"LOG_LEVEL" envDefault:"info"`
 	ColoredLogs bool           `json:"colored_logs" env:"COLORED_LOGS" envDefault:"false"`
 	IMAP        IMAPConfig     `json:"imap"`
+	MSGraph     MSGraphConfig  `json:"msgraph"`
 	Database    DatabaseConfig `json:"database"`
 	Server      ServerConfig   `json:"server"`
 }
@@ -102,6 +154,9 @@ func Load(path string) (*Config, error) {
 	if cfg.IMAP.Mailbox == "" {
 		cfg.IMAP.Mailbox = "INBOX"
 	}
+	if cfg.MSGraph.MailboxFolder == "" {
+		cfg.MSGraph.MailboxFolder = "inbox"
+	}
 	if cfg.Database.Path == "" {
 		cfg.Database.Path, err = defaultDBPath()
 		if err != nil || ensureDBPathExists(cfg.Database.Path) != nil {
@@ -122,10 +177,12 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Validate checks that all required configuration values are set.
-// Required fields: IMAP host, username, and password.
+// Validate checks that all required configuration values are set for the active fetch backend.
 // Returns nil if valid, or an error describing the missing configuration.
 func (c *Config) Validate() error {
+	if c.MSGraph.Enabled {
+		return c.MSGraph.validate()
+	}
 	if c.IMAP.Host == "" {
 		return ErrMissingIMAPHost
 	}
@@ -147,15 +204,24 @@ func GenerateSample(path string) error {
 	sample := Config{
 		LogLevel: "info",
 		IMAP: IMAPConfig{
-			Host:     "imap.example.com",
-			Port:     993,
-			Username: "your-email@example.com",
-			Password: "your-password",
-			Mailbox:  "INBOX",
-			UseTLS:   true,
-
+			Host:             "imap.example.com",
+			Port:             993,
+			Username:         "your-email@example.com",
+			Password:         "your-password",
+			Mailbox:          "INBOX",
+			UseTLS:           true,
 			MarkAsSeen:       true,
 			ProcessedMailbox: "",
+		},
+		MSGraph: MSGraphConfig{
+			Enabled:         false,
+			TenantID:        "",
+			ClientID:        "",
+			ClientSecret:    "",
+			Mailbox:         "dmarc@example.com",
+			MailboxFolder:   "inbox",
+			MarkAsRead:      true,
+			ProcessedFolder: "",
 		},
 		Database: DatabaseConfig{
 			Path: dbPath,

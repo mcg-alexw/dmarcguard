@@ -1,0 +1,40 @@
+{
+  "_frame_metadata": {
+    "purpose": "Task tracking for the project",
+    "forAI": "Check this file to understand what tasks are pending, in progress, or completed. Update task status as you work. Add new tasks when discovered during development. Follow the task recognition rules in AGENTS.md. IMPORTANT: Tasks live in a single flat 'tasks' array; the per-task 'status' field ('pending' | 'in_progress' | 'completed') is the single source of truth — to change a task's state, only update its status field (do not move or duplicate it). Include userRequest (original user prompt), detailed description, and acceptanceCriteria for each task.",
+    "lastUpdated": "2026-06-25",
+    "generatedBy": "Frame"
+  },
+  "project": "C:\\dmarcguard",
+  "version": "1.2",
+  "lastUpdated": "2026-06-25T14:28:32.993Z",
+  "tasks": [],
+  "taskSchema": {
+    "_comment": "This schema shows the expected structure for each task",
+    "id": "unique-id (task-xxx format)",
+    "title": "Short actionable title (max 60 chars)",
+    "description": "Claude's detailed explanation - what, how, which files affected",
+    "userRequest": "Original user prompt/request - copy verbatim",
+    "acceptanceCriteria": "When is this task done? Concrete testable criteria",
+    "notes": "Discussion notes, alternatives considered, dependencies (optional)",
+    "status": "pending | in_progress | completed",
+    "priority": "high | medium | low",
+    "category": "feature | fix | refactor | docs | test",
+    "context": "Session date and context",
+    "createdAt": "ISO timestamp",
+    "updatedAt": "ISO timestamp",
+    "completedAt": "ISO timestamp | null"
+  },
+  "metadata": {
+    "totalCreated": 0,
+    "totalCompleted": 0
+  },
+  "categories": {
+    "feature": "New features",
+    "fix": "Bug fixes",
+    "refactor": "Code improvements",
+    "docs": "Documentation",
+    "test": "Testing",
+    "research": "Research and exploration"
+  }
+}

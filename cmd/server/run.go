@@ -14,6 +14,7 @@ import (
 	"github.com/meysam81/parse-dmarc/internal/imap"
 	"github.com/meysam81/parse-dmarc/internal/logger"
 	"github.com/meysam81/parse-dmarc/internal/metrics"
+	"github.com/meysam81/parse-dmarc/internal/msgraph"
 	"github.com/meysam81/parse-dmarc/internal/parser"
 	"github.com/meysam81/parse-dmarc/internal/storage"
 )
@@ -91,7 +92,7 @@ func run(ctx context.Context, version, commit, date string) error {
 	}
 
 	if fetchOnce {
-		if err := fetchReports(cfg, store, m); err != nil {
+		if err := fetchReports(ctx, cfg, store, m); err != nil {
 			return fmt.Errorf("failed to fetch reports: %w", err)
 		}
 		server.RefreshMetrics()
@@ -101,7 +102,7 @@ func run(ctx context.Context, version, commit, date string) error {
 
 	log.Info().Int("interval_seconds", fetchInterval).Msg("starting continuous fetch mode")
 
-	if err := fetchReports(cfg, store, m); err != nil {
+	if err := fetchReports(ctx, cfg, store, m); err != nil {
 		log.Error().Err(err).Msg("initial fetch failed")
 	}
 	server.RefreshMetrics()
@@ -112,7 +113,7 @@ func run(ctx context.Context, version, commit, date string) error {
 	for {
 		select {
 		case <-ticker.C:
-			if err := fetchReports(cfg, store, m); err != nil {
+			if err := fetchReports(ctx, cfg, store, m); err != nil {
 				log.Error().Err(err).Msg("fetch failed")
 			}
 			server.RefreshMetrics()
@@ -127,15 +128,21 @@ func run(ctx context.Context, version, commit, date string) error {
 	}
 }
 
-func fetchReports(cfg *config.Config, store *storage.Storage, m *metrics.Metrics) error {
-	log.Info().Msg("fetching DMARC reports")
+func fetchReports(ctx context.Context, cfg *config.Config, store *storage.Storage, m *metrics.Metrics) error {
+	if cfg.MSGraph.Enabled {
+		return fetchReportsMSGraph(ctx, cfg, store, m)
+	}
+	return fetchReportsIMAP(cfg, store, m)
+}
+
+func fetchReportsIMAP(cfg *config.Config, store *storage.Storage, m *metrics.Metrics) error {
+	log.Info().Msg("fetching DMARC reports via IMAP")
 
 	fetchStart := time.Now()
 	if m != nil {
 		m.FetchCyclesTotal.Inc()
 	}
 
-	// Create IMAP client
 	connectStart := time.Now()
 	client := imap.NewClient(&cfg.IMAP, log)
 	if err := client.Connect(); err != nil {
@@ -150,7 +157,6 @@ func fetchReports(cfg *config.Config, store *storage.Storage, m *metrics.Metrics
 	}
 	defer func() { _ = client.Disconnect() }()
 
-	// Fetch reports
 	result, err := client.FetchDMARCReports()
 	if err != nil {
 		if m != nil {
@@ -174,14 +180,12 @@ func fetchReports(cfg *config.Config, store *storage.Storage, m *metrics.Metrics
 
 	log.Info().Int("count", len(result.Reports)).Msg("processing reports")
 
-	// Process each report
 	processed := 0
 	for _, report := range result.Reports {
 		for _, attachment := range report.Attachments {
 			if m != nil {
 				m.AttachmentsTotal.Inc()
 			}
-
 			feedback, err := parser.ParseReport(attachment.Data)
 			if err != nil {
 				log.Warn().Err(err).Str("filename", attachment.Filename).Msg("failed to parse report")
@@ -193,7 +197,6 @@ func fetchReports(cfg *config.Config, store *storage.Storage, m *metrics.Metrics
 			if m != nil {
 				m.ReportsParsed.Inc()
 			}
-
 			if err := store.SaveReport(feedback); err != nil {
 				log.Error().Err(err).Str("report_id", feedback.ReportMetadata.ReportID).Msg("failed to save report")
 				if m != nil {
@@ -204,7 +207,6 @@ func fetchReports(cfg *config.Config, store *storage.Storage, m *metrics.Metrics
 			if m != nil {
 				m.ReportsStored.Inc()
 			}
-
 			log.Info().
 				Str("report_id", feedback.ReportMetadata.ReportID).
 				Str("org", feedback.ReportMetadata.OrgName).
@@ -215,7 +217,6 @@ func fetchReports(cfg *config.Config, store *storage.Storage, m *metrics.Metrics
 		}
 	}
 
-	// Post-processing: mark as seen and/or move messages
 	if len(result.MessageIDs) > 0 {
 		if cfg.IMAP.MarkAsSeen {
 			if err := client.MarkAsSeen(result.MessageIDs); err != nil {
@@ -229,6 +230,121 @@ func fetchReports(cfg *config.Config, store *storage.Storage, m *metrics.Metrics
 				log.Error().Err(err).Msg("failed to move messages to processed mailbox")
 			} else {
 				log.Info().Int("count", len(result.MessageIDs)).Str("mailbox", cfg.IMAP.ProcessedMailbox).Msg("moved messages to processed mailbox")
+			}
+		}
+	}
+
+	if m != nil {
+		m.RecordFetchDuration(time.Since(fetchStart))
+		m.LastFetchTimestamp.SetToCurrentTime()
+	}
+
+	log.Info().Int("count", processed).Msg("reports processed")
+	return nil
+}
+
+func fetchReportsMSGraph(ctx context.Context, cfg *config.Config, store *storage.Storage, m *metrics.Metrics) error {
+	log.Info().Msg("fetching DMARC reports via Microsoft Graph")
+
+	fetchStart := time.Now()
+	if m != nil {
+		m.FetchCyclesTotal.Inc()
+	}
+
+	client := msgraph.NewClient(&cfg.MSGraph, log)
+	if err := client.Connect(ctx); err != nil {
+		if m != nil {
+			m.FetchErrors.Inc()
+		}
+		return fmt.Errorf("connect to Microsoft Graph: %w", err)
+	}
+
+	// Resolve the processed folder ID once so we don't look it up per-message.
+	var processedFolderID string
+	if cfg.MSGraph.ProcessedFolder != "" {
+		var err error
+		processedFolderID, err = client.EnsureFolder(ctx, cfg.MSGraph.ProcessedFolder)
+		if err != nil {
+			return fmt.Errorf("ensure processed folder: %w", err)
+		}
+	}
+
+	messages, err := client.FetchMessages(ctx)
+	if err != nil {
+		if m != nil {
+			m.FetchErrors.Inc()
+		}
+		return fmt.Errorf("fetch messages: %w", err)
+	}
+
+	if m != nil {
+		m.ReportsFetched.Add(float64(len(messages)))
+	}
+
+	if len(messages) == 0 {
+		log.Info().Msg("no new messages found")
+		if m != nil {
+			m.RecordFetchDuration(time.Since(fetchStart))
+			m.LastFetchTimestamp.SetToCurrentTime()
+		}
+		return nil
+	}
+
+	log.Info().Int("count", len(messages)).Msg("processing messages")
+
+	var messageIDs []string
+	processed := 0
+
+	for _, msg := range messages {
+		messageIDs = append(messageIDs, msg.ID)
+		for _, att := range msg.Attachments {
+			if m != nil {
+				m.AttachmentsTotal.Inc()
+			}
+			feedback, err := parser.ParseReport(att.Data)
+			if err != nil {
+				log.Warn().Err(err).Str("filename", att.Filename).Msg("failed to parse report")
+				if m != nil {
+					m.ReportParseErrors.Inc()
+				}
+				continue
+			}
+			if m != nil {
+				m.ReportsParsed.Inc()
+			}
+			if err := store.SaveReport(feedback); err != nil {
+				log.Error().Err(err).Str("report_id", feedback.ReportMetadata.ReportID).Msg("failed to save report")
+				if m != nil {
+					m.ReportStoreErrors.Inc()
+				}
+				continue
+			}
+			if m != nil {
+				m.ReportsStored.Inc()
+			}
+			log.Info().
+				Str("report_id", feedback.ReportMetadata.ReportID).
+				Str("org", feedback.ReportMetadata.OrgName).
+				Str("domain", feedback.PolicyPublished.Domain).
+				Int("messages", feedback.GetTotalMessages()).
+				Msg("saved report")
+			processed++
+		}
+	}
+
+	if len(messageIDs) > 0 {
+		if cfg.MSGraph.MarkAsRead {
+			if err := client.MarkAsRead(ctx, messageIDs); err != nil {
+				log.Error().Err(err).Msg("failed to mark messages as read")
+			} else {
+				log.Info().Int("count", len(messageIDs)).Msg("marked messages as read")
+			}
+		}
+		if processedFolderID != "" {
+			if err := client.MoveMessages(ctx, messageIDs, processedFolderID); err != nil {
+				log.Error().Err(err).Msg("failed to move messages to processed folder")
+			} else {
+				log.Info().Int("count", len(messageIDs)).Str("folder", cfg.MSGraph.ProcessedFolder).Msg("moved messages to processed folder")
 			}
 		}
 	}

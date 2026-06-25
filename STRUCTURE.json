@@ -1,0 +1,18 @@
+{
+  "_frame_metadata": {
+    "purpose": "Project structure and module map for AI assistants",
+    "forAI": "Read this file FIRST when starting work on this project. It contains the module structure, data flow, and conventions. Update this file when you add new modules or change the architecture.",
+    "lastUpdated": "2026-06-25",
+    "generatedBy": "Frame"
+  },
+  "version": "1.0",
+  "description": "C:\\dmarcguard - update this description",
+  "architecture": {
+    "type": "",
+    "entryPoint": "",
+    "notes": ""
+  },
+  "modules": {},
+  "dataFlow": [],
+  "conventions": {}
+}
