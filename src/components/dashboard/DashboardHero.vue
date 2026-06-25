@@ -33,7 +33,7 @@ const statusMessage = computed(() => {
 
 const statusSubtext = computed(() => {
   if (healthState.value === "nodata")
-    return "No DMARC reports received yet. Check IMAP connection.";
+    return "No DMARC reports received yet. Check your IMAP or Microsoft Graph connection.";
   if (healthState.value === "secure") return "Traffic is fully authenticated.";
   if (healthState.value === "warning")
     return "Some legitimate email may be failing.";
