@@ -197,31 +197,43 @@ func (c *Client) resolveFolderID(ctx context.Context, name string) (string, erro
 
 // fetchAttachments downloads all non-inline DMARC file attachments for a message.
 func (c *Client) fetchAttachments(ctx context.Context, msgID string) ([]Attachment, error) {
-	attURL := fmt.Sprintf(
-		"%s/users/%s/messages/%s/attachments?$select=id,name,contentType,contentBytes,isInline,@odata.type",
+	// $select cannot include contentBytes here: it is a fileAttachment-specific property
+	// and Graph API validates $select against the base attachment type, returning HTTP 400.
+	// We list metadata first, then fetch each qualifying attachment individually.
+	listURL := fmt.Sprintf(
+		"%s/users/%s/messages/%s/attachments?$select=id,name,contentType,isInline,@odata.type",
 		graphBase, url.PathEscape(c.cfg.Mailbox), msgID,
 	)
-	var resp struct {
+	var listResp struct {
 		Value []struct {
-			ODataType    string `json:"@odata.type"`
-			Name         string `json:"name"`
-			ContentType  string `json:"contentType"`
-			ContentBytes string `json:"contentBytes"` // base64; present only on fileAttachment
-			IsInline     bool   `json:"isInline"`
+			ID          string `json:"id"`
+			ODataType   string `json:"@odata.type"`
+			Name        string `json:"name"`
+			ContentType string `json:"contentType"`
+			IsInline    bool   `json:"isInline"`
 		} `json:"value"`
 	}
-	if err := c.graphDo(ctx, "GET", attURL, nil, &resp); err != nil {
+	if err := c.graphDo(ctx, "GET", listURL, nil, &listResp); err != nil {
 		return nil, err
 	}
 	var result []Attachment
-	for _, a := range resp.Value {
+	mailbox := url.PathEscape(c.cfg.Mailbox)
+	for _, a := range listResp.Value {
 		if a.IsInline || a.ODataType != "#microsoft.graph.fileAttachment" {
 			continue
 		}
 		if !isDMARCAttachment(a.Name) {
 			continue
 		}
-		data, err := base64.StdEncoding.DecodeString(a.ContentBytes)
+		var full struct {
+			ContentBytes string `json:"contentBytes"`
+		}
+		attURL := fmt.Sprintf("%s/users/%s/messages/%s/attachments/%s", graphBase, mailbox, msgID, a.ID)
+		if err := c.graphDo(ctx, "GET", attURL, nil, &full); err != nil {
+			c.log.Warn().Err(err).Str("name", a.Name).Msg("failed to fetch attachment content, skipping")
+			continue
+		}
+		data, err := base64.StdEncoding.DecodeString(full.ContentBytes)
 		if err != nil {
 			c.log.Warn().Err(err).Str("name", a.Name).Msg("failed to base64-decode attachment, skipping")
 			continue
